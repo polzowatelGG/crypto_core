@@ -1,0 +1,20 @@
+# виртуальное окружение и кэш Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# macOS
+.DS_Store
+
+# результаты работы инструмента (шифртексты и расшифрованные файлы)
+*.bin
+*.enc
+*.dec
+decrypted*.txt
+
+# рабочая папка NIST STS (tests/run_nist_sts.sh)
+nist_sts/
