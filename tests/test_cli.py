@@ -96,6 +96,36 @@ class TestCLI(CLITestBase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("слишком короткий", r.stderr)
 
+    def test_iv_rejected_for_ecb(self):  # ECB не использует IV
+        r = run_cli("--mode", "ecb", "--decrypt", "--key", KEY, "--iv", IV,
+                    "--input", self.plain, "--output", self.path("d.bin"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("ECB", r.stderr)
+        self.assertFalse(os.path.exists(self.path("d.bin")))
+
+    def test_abbreviated_options_rejected(self):  # CLI-4 спринта 1: только точные имена аргументов
+        r = run_cli("--mode", "cbc", "--enc", "--key", KEY, "--input", self.plain, "--output", self.path("c.bin"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(self.path("c.bin")))
+
+    def test_duplicate_options_rejected(self):  # CLI-4 спринта 1: конфликтующие аргументы
+        r = run_cli("--mode", "cbc", "--encrypt", "--key", KEY, "--key", "2b7e151628aed2a6abf7158809cf4f3c",
+                    "--input", self.plain, "--output", self.path("c.bin"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--key", r.stderr)
+        self.assertFalse(os.path.exists(self.path("c.bin")))
+
+    def test_hash_algorithm_rejected_for_encryption(self):
+        r = subprocess.run([sys.executable, "-m", "src.cli_parser", "--algorithm", "sha256", "--mode", "cbc",
+                            "--encrypt", "--input", self.plain], cwd=PROJECT_ROOT, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_input_is_directory(self):  # IO-3 спринта 1: понятная ошибка вместо traceback
+        r = run_cli("--mode", "cbc", "--encrypt", "--key", KEY, "--input", self.tmp, "--output", self.path("c.bin"))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("каталог", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
     def test_ecb_still_works(self):  # STR-1 / CRY-1: регрессия спринта 1
         run_cli("--mode", "ecb", "--encrypt", "--key", KEY, "--input", self.plain, "--output", self.path("c.bin"))
         r = run_cli("--mode", "ecb", "--decrypt", "--key", KEY, "--input", self.path("c.bin"), "--output", self.path("d.bin"))
