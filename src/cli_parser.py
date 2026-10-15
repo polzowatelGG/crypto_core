@@ -1,9 +1,10 @@
 import argparse
 import os
 import sys
-from typing import Optional
+from typing import Iterator, Optional
 from .csprng import CSPRNGError, generate_random_bytes
-from .file_io import read_input_file, write_output_file
+from .file_io import iter_input_chunks, read_input_file, write_output_file
+from .hash import ALGORITHMS
 from .modes.common import BLOCK_SIZE
 from .modes.ecb import encrypt_ecb, decrypt_ecb
 from .modes.cbc import encrypt_cbc, decrypt_cbc
@@ -19,10 +20,15 @@ IV_MODES = {
     "ctr": (encrypt_ctr, decrypt_ctr),
 }
 
+# аргументы, которые есть только у шифрования (CLI-3 спринта 4: dgst их не принимает)
+ENC_ONLY_OPTIONS = ("--mode", "--encrypt", "--decrypt", "--key", "--iv")
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cryptocore",
-        description="Минималистический криптографический провайдер (CryptoCore).",
+        description="Минималистический криптографический провайдер (CryptoCore). "
+                    "Шифрование/расшифрование файлов; для хеширования: cryptocore dgst --help.",
+        allow_abbrev=False,  # иначе argparse молча принимает сокращения вроде --enc или --k
     )
 
     parser.add_argument(
@@ -67,6 +73,46 @@ def build_parser() -> argparse.ArgumentParser:
 
     return parser
 
+def build_dgst_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="cryptocore dgst",
+        description="Вычисление message digest (хеша) файла.",
+        allow_abbrev=False,
+    )
+    parser.add_argument(
+        "--algorithm", required=True, choices=list(ALGORITHMS), help="Хеш-функция.",
+    )
+    parser.add_argument(
+        "--input", required=True, dest="input_path",
+        help="Путь к входному файлу ('-' — стандартный ввод).",
+    )
+    parser.add_argument(
+        "--output", required=False, dest="output_path",
+        help="Записать хеш в файл вместо stdout (в том же формате).",
+    )
+    return parser
+
+def option_names(argv: list[str]) -> Iterator[str]:
+    # имена длинных опций из командной строки, в том числе в форме --opt=value
+    for token in argv:
+        if token.startswith("--"):
+            yield token.split("=", 1)[0]
+
+def reject_duplicate_options(parser: argparse.ArgumentParser, argv: list[str]) -> None:
+    # argparse молча берёт последнее значение повторённой опции — считаем это ошибкой
+    seen = set()
+    for name in option_names(argv):
+        if name in seen:
+            parser.error(f"аргумент {name} указан несколько раз.")
+        seen.add(name)
+
+def format_digest_line(digest_hex: str, path: str) -> str:
+    # CLI-4: формат *sum-утилит 'HASH  PATH'; как в coreutils, обратный слэш и перевод строки
+    # в имени экранируются, а сама строка тогда начинается с обратного слэша
+    if "\\" in path or "\n" in path:
+        return "\\" + digest_hex + "  " + path.replace("\\", "\\\\").replace("\n", "\\n")
+    return f"{digest_hex}  {path}"
+
 def validate_key(key: str) -> bytes: #придумать проверку по длине и валидности
     try:
         key_bytes = bytes.fromhex(key)
@@ -102,15 +148,34 @@ def input_file_exists(path: str) -> None:
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Входной файл '{path}' не найден.")
 
-def main():
+def run_dgst(argv: list[str]) -> None:
+    parser = build_dgst_parser()
+    reject_duplicate_options(parser, argv)
+    for name in option_names(argv):  # CLI-3: аргументы шифрования не принимаются
+        if name in ENC_ONLY_OPTIONS:
+            parser.error(f"аргумент {name} относится к шифрованию и не применим к команде dgst.")
+    args = parser.parse_args(argv)
+
+    hasher = ALGORITHMS[args.algorithm]()
+    for chunk in iter_input_chunks(args.input_path):  # IO-2: по частям, память не растёт
+        hasher.update(chunk)
+    line = format_digest_line(hasher.hexdigest(), args.input_path) + "\n"
+
+    if args.output_path:  # CLI-5, IO-3: в файл в том же формате, что и в stdout
+        write_output_file(args.output_path, line.encode("utf-8", "surrogateescape"))
+    else:
+        sys.stdout.write(line)
+
+def run_enc(argv: list[str]) -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    reject_duplicate_options(parser, argv)
+    args = parser.parse_args(argv)
 
     # CLI-3: при шифровании IV генерируется, передавать его нельзя
     if args.encrypt and args.iv is not None:
         parser.error("--iv допускается только при --decrypt (при шифровании IV генерируется автоматически).")
     if args.mode == "ecb" and args.iv is not None:
-        print("Предупреждение: режим ECB не использует IV, --iv проигнорирован.", file=sys.stderr)
+        parser.error("режим ECB не использует IV, --iv с ним недопустим.")
 
     # CLI-4: без ключа расшифровать нельзя
     if args.decrypt and args.key is None:
@@ -118,7 +183,7 @@ def main():
 
     try:
         key_bytes = validate_key(args.key) if args.key is not None else None
-        iv_bytes = validate_iv(args.iv) if args.iv is not None and args.mode != "ecb" else None
+        iv_bytes = validate_iv(args.iv) if args.iv is not None else None
     except ValueError as e:
         print(f"Ошибка: {e}", file=sys.stderr)
         sys.exit(1)
@@ -172,6 +237,13 @@ def main():
             print(f"IV (записан в начало выходного файла): {iv_bytes.hex()}")
     else:
         print(f"Расшифрование файла '{args.input_path}' в '{output_path}' с использованием алгоритма {args.algorithm} в режиме {args.mode}.")
+
+def main(argv: Optional[list[str]] = None) -> None:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "dgst":  # CLI-1: подкоманда хеширования
+        run_dgst(argv[1:])
+    else:  # шифрование — без подкоманды, как в ТЗ спринтов 1–3
+        run_enc(argv)
 
 if __name__ == "__main__":
     main()
