@@ -20,6 +20,7 @@ K = [
 # первые 32 бита дробных частей квадратных корней первых 8 простых чисел (FIPS 180-4, 5.3.3)
 H0 = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
 
+MAX_MESSAGE_LEN = (1 << 61) - 1  # FIPS 180-4: длина сообщения < 2^64 бит
 
 
 class SHA256(HashFunction):
@@ -60,6 +61,8 @@ class SHA256(HashFunction):
         self.h = [(x + y) & MASK for x, y in zip(self.h, (a, b, c, d, e, f, g, h))]
 
     def update(self, message: bytes) -> "SHA256":
+        if self._length + len(message) > MAX_MESSAGE_LEN:
+            raise ValueError("SHA-256 допускает сообщения короче 2^64 бит.")
         self._length += len(message)
         data = self._buffer + message
         full = len(data) - len(data) % BLOCK_SIZE
