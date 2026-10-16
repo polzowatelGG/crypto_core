@@ -113,6 +113,51 @@ class TestDgstOutputFile(DgstTestBase):  # CLI-5, IO-3
                 with open(out, "rb") as f:
                     self.assertEqual(f.read(), r_std.stdout)
 
+    def test_stdout_bytes_do_not_depend_on_terminal_encoding(self):  # IO-3
+        name = self.path("файл.txt")
+        with open(name, "wb") as f:
+            f.write(b"abc")
+        out = self.path("hash.txt")
+        r_std = subprocess.run(
+            [sys.executable, "-m", "src.cli_parser", "dgst", "--algorithm", "sha256", "--input", name],
+            cwd=PROJECT_ROOT, capture_output=True, env={**os.environ, "PYTHONIOENCODING": "latin-1"},
+        )
+        self.assertEqual(r_std.returncode, 0, r_std.stderr)
+        run_dgst("--algorithm", "sha256", "--input", name, "--output", out).check_returncode()
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), r_std.stdout)
+        self.assertEqual(r_std.stdout, f"{ABC_SHA256}  {name}\n".encode())
+
+    def test_stdin_to_output_file(self):
+        out = self.path("hash.txt")
+        run_dgst("--algorithm", "sha256", "--input", "-", "--output", out, stdin=b"abc").check_returncode()
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), f"{ABC_SHA256}  -\n".encode())
+
+    def test_output_same_as_input_rejected(self):
+        os.symlink(self.file, self.path("link"))
+        for out in (self.file, self.path("link")):
+            with self.subTest(output=out):
+                r = run_dgst("--algorithm", "sha256", "--input", self.file, "--output", out)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("совпадает с --input", r.stderr.decode())
+                with open(self.file, "rb") as f:
+                    self.assertEqual(f.read(), DATA)  # входной файл не тронут
+
+    def test_empty_paths_rejected(self):
+        r = run_dgst("--algorithm", "sha256", "--input", self.file, "--output", "")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, b"")  # хеш не должен молча уйти в stdout
+        self.assertNotEqual(run_dgst("--algorithm", "sha256", "--input", "").returncode, 0)
+
+    def test_output_write_errors(self):  # IO-4
+        r = run_dgst("--algorithm", "sha256", "--input", self.file, "--output", self.path("no/dir/h.txt"))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("не существует", r.stderr.decode())
+        r = run_dgst("--algorithm", "sha256", "--input", self.file, "--output", self.tmp)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("каталог", r.stderr.decode())
+
     def test_output_not_created_on_missing_input(self):
         out = self.path("hash.txt")
         r = run_dgst("--algorithm", "sha256", "--input", self.path("nope"), "--output", out)
@@ -161,6 +206,15 @@ class TestDgstArguments(DgstTestBase):
         r = run_dgst("--algorithm", "sha256", "--input", self.tmp)
         self.assertEqual(r.returncode, 1)
         self.assertIn("каталог", r.stderr.decode())
+
+
+class TestChunkedReading(DgstTestBase):  # IO-1, IO-2
+    def test_reads_in_bounded_chunks(self):
+        from src.file_io import CHUNK_SIZE, iter_input_chunks
+        chunks = list(iter_input_chunks(self.file))
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(c) <= CHUNK_SIZE for c in chunks))
+        self.assertEqual(b"".join(chunks), DATA)
 
 
 @unittest.skipUnless(os.environ.get("CRYPTOCORE_LARGE_TEST"), "задайте CRYPTOCORE_LARGE_TEST=1 (долго)")
