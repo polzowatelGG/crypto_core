@@ -126,6 +126,17 @@ class TestCLI(CLITestBase):
         self.assertIn("каталог", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
 
+    def test_output_same_as_input_rejected(self):  # исходный файл не должен затираться
+        r = run_cli("--mode", "ctr", "--encrypt", "--key", KEY, "--input", self.plain, "--output", self.plain)
+        self.assertNotEqual(r.returncode, 0)
+        with open(self.plain, "rb") as f:
+            self.assertEqual(f.read(), PLAINTEXT)
+
+    def test_empty_output_rejected(self):  # раньше молча подставлялось имя по умолчанию
+        r = run_cli("--mode", "ctr", "--encrypt", "--key", KEY, "--input", self.plain, "--output", "")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(self.plain + ".enc"))
+
     def test_ecb_still_works(self):  # STR-1 / CRY-1: регрессия спринта 1
         run_cli("--mode", "ecb", "--encrypt", "--key", KEY, "--input", self.plain, "--output", self.path("c.bin"))
         r = run_cli("--mode", "ecb", "--decrypt", "--key", KEY, "--input", self.path("c.bin"), "--output", self.path("d.bin"))
