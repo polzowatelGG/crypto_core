@@ -3,7 +3,7 @@ import os
 import sys
 from typing import Iterator, Optional
 from .csprng import CSPRNGError, generate_random_bytes
-from .file_io import iter_input_chunks, read_input_file, write_output_file
+from .file_io import is_same_file, iter_input_chunks, read_input_file, write_output_file, write_stdout
 from .hash import ALGORITHMS
 from .modes.common import BLOCK_SIZE
 from .modes.ecb import encrypt_ecb, decrypt_ecb
@@ -22,6 +22,12 @@ IV_MODES = {
 
 # аргументы, которые есть только у шифрования (CLI-3 спринта 4: dgst их не принимает)
 ENC_ONLY_OPTIONS = ("--mode", "--encrypt", "--decrypt", "--key", "--iv")
+
+def nonempty_path(value: str) -> str:
+    # пустой путь иначе молча считался бы «аргумент не указан»
+    if not value:
+        raise argparse.ArgumentTypeError("путь не может быть пустым.")
+    return value
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -65,10 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
              "если не указан, IV читается из первых 16 байт входного файла.",
     )
     parser.add_argument(
-        "--input", required=True, dest="input_path", help="Путь к входному файлу." #уточнение формата входного файла
+        "--input", required=True, dest="input_path", type=nonempty_path, help="Путь к входному файлу." #уточнение формата входного файла
     )
     parser.add_argument(
-        "--output", required=False, dest="output_path", help="Путь к выходному файлу." #уточнение формата выходного файла
+        "--output", required=False, dest="output_path", type=nonempty_path, help="Путь к выходному файлу." #уточнение формата выходного файла
     )
 
     return parser
@@ -83,11 +89,11 @@ def build_dgst_parser() -> argparse.ArgumentParser:
         "--algorithm", required=True, choices=list(ALGORITHMS), help="Хеш-функция.",
     )
     parser.add_argument(
-        "--input", required=True, dest="input_path",
+        "--input", required=True, dest="input_path", type=nonempty_path,
         help="Путь к входному файлу ('-' — стандартный ввод).",
     )
     parser.add_argument(
-        "--output", required=False, dest="output_path",
+        "--output", required=False, dest="output_path", type=nonempty_path,
         help="Записать хеш в файл вместо stdout (в том же формате).",
     )
     return parser
@@ -155,16 +161,19 @@ def run_dgst(argv: list[str]) -> None:
         if name in ENC_ONLY_OPTIONS:
             parser.error(f"аргумент {name} относится к шифрованию и не применим к команде dgst.")
     args = parser.parse_args(argv)
+    if args.output_path is not None and is_same_file(args.input_path, args.output_path):
+        parser.error("--output совпадает с --input: входной файл был бы перезаписан хешем.")
 
     hasher = ALGORITHMS[args.algorithm]()
     for chunk in iter_input_chunks(args.input_path):  # IO-2: по частям, память не растёт
         hasher.update(chunk)
-    line = format_digest_line(hasher.hexdigest(), args.input_path) + "\n"
+    # IO-3: одни и те же байты и для stdout, и для файла; имя кодируется как в файловой системе
+    line = os.fsencode(format_digest_line(hasher.hexdigest(), args.input_path) + "\n")
 
-    if args.output_path:  # CLI-5, IO-3: в файл в том же формате, что и в stdout
-        write_output_file(args.output_path, line.encode("utf-8", "surrogateescape"))
+    if args.output_path is not None:  # CLI-5: в файл вместо stdout
+        write_output_file(args.output_path, line)
     else:
-        sys.stdout.write(line)
+        write_stdout(line)
 
 def run_enc(argv: list[str]) -> None:
     parser = build_parser()
@@ -195,7 +204,10 @@ def run_enc(argv: list[str]) -> None:
                   f"Для шифрования лучше не указывать --key — тогда ключ будет сгенерирован случайно.",
                   file=sys.stderr)
 
-    output_path = args.output_path if args.output_path else (
+    if args.output_path is not None and is_same_file(args.input_path, args.output_path):
+        parser.error("--output совпадает с --input: исходный файл был бы перезаписан.")
+
+    output_path = args.output_path if args.output_path is not None else (
         args.input_path + (".enc" if args.encrypt else ".dec")
     )
 
