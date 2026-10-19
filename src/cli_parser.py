@@ -150,10 +150,6 @@ def validate_iv(iv: str) -> bytes:
         raise ValueError(f"IV должен быть длиной {BLOCK_SIZE} байт, получено {len(iv_bytes)}.")
     return iv_bytes
 
-def input_file_exists(path: str) -> None:
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"Входной файл '{path}' не найден.")
-
 def run_dgst(argv: list[str]) -> None:
     parser = build_dgst_parser()
     reject_duplicate_options(parser, argv)
