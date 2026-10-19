@@ -220,6 +220,18 @@ class TestOpenSSLCompatibility(CLITestBase):
                 self.assertEqual(r.returncode, 0, r.stderr)
                 self.assertEqual(self.read("d.bin"), PLAINTEXT)
 
+    def test_ecb_identical_to_openssl(self):  # ECB без IV: шифртексты должны совпасть байт в байт
+        r = run_cli("--mode", "ecb", "--encrypt", "--key", KEY,
+                    "--input", self.plain, "--output", self.path("ours.bin"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = run_openssl("-aes-128-ecb", "-K", KEY, "-in", self.plain, "-out", self.path("theirs.bin"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.read("ours.bin"), self.read("theirs.bin"))
+        r = run_cli("--mode", "ecb", "--decrypt", "--key", KEY,
+                    "--input", self.path("theirs.bin"), "--output", self.path("d.bin"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.read("d.bin"), PLAINTEXT)
+
 
 if __name__ == "__main__":
     unittest.main()

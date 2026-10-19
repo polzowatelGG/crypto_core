@@ -93,6 +93,41 @@ class TestDgstOutput(DgstTestBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.decode(), f"{ABC_SHA256}  -\n")
 
+    def test_spec_examples_via_stdin(self):  # примеры тестовых команд из ТЗ (TEST-1)
+        cases = [
+            ("sha256", b"abc", ABC_SHA256),
+            ("sha256", b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"),
+            ("sha3-256", b"abc", "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532"),
+            ("sha3-256", b"", "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a"),
+            ("blake3", b"", "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"),
+        ]
+        for algorithm, data, expected in cases:
+            with self.subTest(algorithm=algorithm, data=data):
+                r = run_dgst("--algorithm", algorithm, "--input", "-", stdin=data)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout.decode(), f"{expected}  -\n")
+
+    def test_empty_file_all_algorithms(self):  # TEST-2
+        empty = self.path("empty")
+        open(empty, "wb").close()
+        for algorithm in ("sha256", "sha3-256", "blake3"):
+            with self.subTest(algorithm=algorithm):
+                expected = system_hash(algorithm, empty)
+                if expected is None:
+                    self.skipTest(f"нет эталонной утилиты для {algorithm}")
+                r = run_dgst("--algorithm", algorithm, "--input", empty)
+                self.assertEqual(r.stdout.decode(), f"{expected}  {empty}\n")
+
+    def test_help_does_not_mention_encryption_options(self):  # CLI-3
+        r = run_dgst("--help")
+        self.assertEqual(r.returncode, 0)
+        help_text = r.stdout.decode()
+        for option in ("--algorithm", "--input", "--output"):
+            self.assertIn(option, help_text)
+        for option in ("--key", "--iv", "--mode", "--encrypt", "--decrypt"):
+            self.assertNotIn(option, help_text)
+
     def test_backslash_in_name_is_escaped(self):  # как в coreutils
         name = self.path("a\\b.txt")
         with open(name, "wb") as f:

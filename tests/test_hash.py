@@ -1,6 +1,12 @@
+import hashlib
+import os
+import tempfile
+import tracemalloc
 import unittest
 
+from src.file_io import CHUNK_SIZE, iter_input_chunks
 from src.hash import BLAKE3, SHA256, SHA3_256
+from src.hash.sha256 import MAX_MESSAGE_LEN
 
 MSG_448 = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
 MSG_896 = (b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno"
@@ -102,6 +108,106 @@ class TestAvalanche(unittest.TestCase):  # TEST-5
                 h1, h2 = int(cls().hash(original), 16), int(cls().hash(modified), 16)
                 diff = bin(h1 ^ h2).count("1")
                 self.assertTrue(100 < diff < 156, f"изменилось только {diff}/256 бит")
+
+    def test_example_from_spec(self):  # пример из ТЗ: '!' -> '?'
+        for cls in ALL:
+            with self.subTest(algorithm=cls.name):
+                h1 = int(cls().hash(b"Hello, world!"), 16)
+                h2 = int(cls().hash(b"Hello, world?"), 16)
+                diff = bin(h1 ^ h2).count("1")
+                self.assertTrue(100 < diff < 156, f"изменилось только {diff}/256 бит")
+
+    def test_average_over_every_bit_of_a_block(self):
+        # каждый из 512 бит 64-байтного сообщения по очереди: среднее число изменившихся бит
+        # должно быть ~128 (стандартное отклонение одного опыта 8, среднего по 512 — ~0.35)
+        data = bytes(range(64))
+        for cls in ALL:
+            with self.subTest(algorithm=cls.name):
+                base = int(cls().hash(data), 16)
+                diffs = []
+                for bit in range(len(data) * 8):
+                    flipped = bytearray(data)
+                    flipped[bit // 8] ^= 1 << (bit % 8)
+                    diffs.append(bin(base ^ int(cls().hash(bytes(flipped)), 16)).count("1"))
+                mean = sum(diffs) / len(diffs)
+                self.assertTrue(126 < mean < 130, f"среднее {mean:.2f} бит из 256")
+                self.assertGreater(min(diffs), 80)  # ни одного «слабого» бита
+
+
+class TestAgainstReference(unittest.TestCase):  # TEST-1: все длины вокруг границ блоков
+    # SHA-256: блок 64 байта, padding перестаёт помещаться в блок с 56 байт хвоста;
+    # SHA3-256: rate 136 байт; BLAKE3: блок 64 байта, чанк 1024 байта
+    LENGTHS = sorted({*range(0, 300), *range(1000, 1100), 2047, 2048, 2049, 3071, 3072, 3073})
+
+    def check(self, cls, reference):
+        data = os.urandom(max(self.LENGTHS))
+        for n in self.LENGTHS:
+            with self.subTest(algorithm=cls.name, length=n):
+                self.assertEqual(cls().hash(data[:n]), reference(data[:n]))
+
+    def test_sha256_matches_hashlib(self):
+        self.check(SHA256, lambda d: hashlib.sha256(d).hexdigest())
+
+    def test_sha3_256_matches_hashlib(self):
+        self.check(SHA3_256, lambda d: hashlib.sha3_256(d).hexdigest())
+
+    def test_blake3_matches_reference(self):
+        try:
+            import blake3
+        except ImportError:
+            self.skipTest("пакет blake3 не установлен (pip install blake3)")
+        self.check(BLAKE3, lambda d: blake3.blake3(d).hexdigest())
+
+
+class TestSHA256Padding(unittest.TestCase):  # HASH-1
+    def test_padding_structure(self):
+        for n in range(0, 200):
+            with self.subTest(length=n):
+                pad = SHA256().padding(n)
+                self.assertEqual((n + len(pad)) % 64, 0)
+                self.assertEqual(pad[0], 0x80)  # бит 1 сразу за сообщением
+                self.assertEqual(pad[1:-8], b"\x00" * (len(pad) - 9))
+                self.assertEqual(int.from_bytes(pad[-8:], "big"), n * 8)  # длина в битах
+                self.assertLessEqual(len(pad), 72)  # не больше одного лишнего блока
+
+    def test_extra_block_boundary(self):
+        # 55 байт + 0x80 + 8 байт длины ровно в один блок, 56 байт уже требуют второго
+        self.assertEqual(55 + len(SHA256().padding(55)), 64)
+        self.assertEqual(56 + len(SHA256().padding(56)), 128)
+
+    def test_message_length_limit(self):
+        h = SHA256()
+        h._length = MAX_MESSAGE_LEN
+        h.update(b"")  # ровно на границе — допустимо
+        with self.assertRaises(ValueError):
+            h.update(b"a")
+
+
+class TestConstantMemory(unittest.TestCase):  # HASH-5, IO-2
+    def peak_memory(self, cls, size):
+        fd, path = tempfile.mkstemp()
+        with os.fdopen(fd, "wb") as f:
+            f.write(os.urandom(size))
+        self.addCleanup(os.remove, path)
+        h = cls()
+        tracemalloc.start()
+        for chunk in iter_input_chunks(path):
+            h.update(chunk)
+        h.digest()
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        return peak
+
+    def test_memory_does_not_grow_with_file_size(self):
+        # у пика есть постоянная часть (~150 КБ: буферы open() и т. п.), поэтому сравниваем
+        # два размера файла: при 8-кратном росте входа пик не должен заметно вырасти
+        small, big = 64 * 1024, 512 * 1024
+        for cls in ALL:
+            with self.subTest(algorithm=cls.name):
+                peak_small, peak_big = self.peak_memory(cls, small), self.peak_memory(cls, big)
+                self.assertLess(peak_big, peak_small + 2 * CHUNK_SIZE,
+                                f"пик {peak_small} -> {peak_big} байт при росте файла {small} -> {big}")
+                self.assertLess(peak_big, big // 2)  # файл целиком в память не читается
 
 
 if __name__ == "__main__":
