@@ -123,9 +123,10 @@ class TestDgstOutput(DgstTestBase):
         r = run_dgst("--help")
         self.assertEqual(r.returncode, 0)
         help_text = r.stdout.decode()
-        for option in ("--algorithm", "--input", "--output"):
+        for option in ("--algorithm", "--input", "--output", "--hmac", "--key", "--verify"):
             self.assertIn(option, help_text)
-        for option in ("--key", "--iv", "--mode", "--encrypt", "--decrypt"):
+        # --key теперь есть у dgst (спринт 5, ключ MAC), остальные аргументы шифрования — нет
+        for option in ("--iv", "--mode", "--encrypt", "--decrypt"):
             self.assertNotIn(option, help_text)
 
     def test_backslash_in_name_is_escaped(self):  # как в coreutils
