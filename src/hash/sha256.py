@@ -26,6 +26,7 @@ MAX_MESSAGE_LEN = (1 << 61) - 1  # FIPS 180-4: длина сообщения < 2
 class SHA256(HashFunction):
     name = "sha256"
     digest_size = 32
+    block_size = BLOCK_SIZE
 
     def __init__(self):
         self.h = list(H0)

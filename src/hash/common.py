@@ -3,6 +3,7 @@ class HashFunction:
 
     name = ""
     digest_size = 0
+    block_size = 0  # байт; нужен HMAC для выравнивания ключа
 
     def update(self, data: bytes) -> "HashFunction":
         raise NotImplementedError

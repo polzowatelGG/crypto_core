@@ -118,6 +118,7 @@ def _parent_output(left: list[int], right: list[int], key_words: list[int]) -> _
 
 class BLAKE3(HashFunction):
     name = "blake3"
+    block_size = BLOCK_LEN
     digest_size = 32
 
     def __init__(self):

@@ -61,6 +61,7 @@ def keccak_f1600(a: list[int]) -> list[int]:
 class SHA3_256(HashFunction):
     name = "sha3-256"
     digest_size = 32
+    block_size = RATE  # для HMAC-SHA3 блоком считается rate (FIPS 202, NIST SP 800-224)
 
     def __init__(self):
         self._state = [0] * 25  # 5x5 дорожек по 64 бита
