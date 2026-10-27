@@ -5,6 +5,7 @@ from typing import Iterator, Optional
 from .csprng import CSPRNGError, generate_random_bytes
 from .file_io import is_same_file, iter_input_chunks, read_input_file, write_output_file, write_stdout
 from .hash import ALGORITHMS
+from .mac import CMAC, HMAC, constant_time_equal
 from .modes.common import BLOCK_SIZE
 from .modes.ecb import encrypt_ecb, decrypt_ecb
 from .modes.cbc import encrypt_cbc, decrypt_cbc
@@ -20,8 +21,9 @@ IV_MODES = {
     "ctr": (encrypt_ctr, decrypt_ctr),
 }
 
-# аргументы, которые есть только у шифрования (CLI-3 спринта 4: dgst их не принимает)
-ENC_ONLY_OPTIONS = ("--mode", "--encrypt", "--decrypt", "--key", "--iv")
+# аргументы, которые есть только у шифрования (CLI-3 спринта 4: dgst их не принимает);
+# --key с dgst допустим только вместе с --hmac/--cmac
+ENC_ONLY_OPTIONS = ("--mode", "--encrypt", "--decrypt", "--iv")
 
 def nonempty_path(value: str) -> str:
     # пустой путь иначе молча считался бы «аргумент не указан»
@@ -82,11 +84,29 @@ def build_parser() -> argparse.ArgumentParser:
 def build_dgst_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cryptocore dgst",
-        description="Вычисление message digest (хеша) файла.",
+        description="Вычисление message digest (хеша) файла или кода аутентификации (HMAC, AES-CMAC).",
         allow_abbrev=False,
     )
     parser.add_argument(
-        "--algorithm", required=True, choices=list(ALGORITHMS), help="Хеш-функция.",
+        "--algorithm", required=False, choices=list(ALGORITHMS),
+        help="Хеш-функция. Обязательна для обычного хеша; с --hmac по умолчанию sha256.",
+    )
+    mac_group = parser.add_mutually_exclusive_group()
+    mac_group.add_argument(
+        "--hmac", action="store_true", help="Вычислить HMAC (RFC 2104) с ключом --key.",
+    )
+    mac_group.add_argument(
+        "--cmac", action="store_true", help="Вычислить AES-128-CMAC (NIST SP 800-38B) с ключом --key.",
+    )
+    parser.add_argument(
+        "--key", required=False,
+        help="Ключ MAC в виде hex-строки; обязателен с --hmac/--cmac. "
+             "Для HMAC — любой длины, для CMAC — 16 байт.",
+    )
+    parser.add_argument(
+        "--verify", required=False, dest="verify_path", metavar="FILE", type=nonempty_path,
+        help="Сравнить вычисленный MAC со значением из файла (формат вывода 'MAC  FILE'). "
+             "Код возврата 0 при совпадении, 1 — иначе.",
     )
     parser.add_argument(
         "--input", required=True, dest="input_path", type=nonempty_path,
@@ -94,7 +114,7 @@ def build_dgst_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output", required=False, dest="output_path", type=nonempty_path,
-        help="Записать хеш в файл вместо stdout (в том же формате).",
+        help="Записать хеш или MAC в файл вместо stdout (в том же формате).",
     )
     return parser
 
@@ -118,6 +138,28 @@ def format_digest_line(digest_hex: str, path: str) -> str:
     if "\\" in path or "\n" in path:
         return "\\" + digest_hex + "  " + path.replace("\\", "\\\\").replace("\n", "\\n")
     return f"{digest_hex}  {path}"
+
+def parse_mac_key(key: str) -> bytes:
+    # CLI-2: hex-строка произвольной (но ненулевой) длины
+    try:
+        key_bytes = bytes.fromhex(key)
+    except ValueError:
+        raise ValueError("ключ должен быть в формате hex-строки (чётное число символов 0-9, a-f).")
+    if not key_bytes:
+        raise ValueError("ключ не может быть пустым.")
+    return key_bytes
+
+def read_expected_mac(path: str) -> bytes:
+    # IO-2: файл в формате вывода 'MAC  FILE'; берём первое слово, пробелы и имя файла игнорируем
+    text = read_input_file(path).decode("utf-8", errors="replace")
+    words = text.split()
+    if not words:
+        raise ValueError(f"файл '{path}' пуст: в нём нет значения MAC.")
+    value = words[0].removeprefix("\\")  # строка с экранированным именем начинается с '\'
+    try:
+        return bytes.fromhex(value)
+    except ValueError:
+        raise ValueError(f"в файле '{path}' нет корректного hex-значения MAC.")
 
 def validate_key(key: str) -> bytes: #придумать проверку по длине и валидности
     try:
@@ -157,12 +199,46 @@ def run_dgst(argv: list[str]) -> None:
         if name in ENC_ONLY_OPTIONS:
             parser.error(f"аргумент {name} относится к шифрованию и не применим к команде dgst.")
     args = parser.parse_args(argv)
+    mac_mode = args.hmac or args.cmac
+    if not mac_mode:
+        for name, value in (("--key", args.key), ("--verify", args.verify_path)):
+            if value is not None:
+                parser.error(f"аргумент {name} допустим только вместе с --hmac или --cmac.")
+        if args.algorithm is None:
+            parser.error("требуется аргумент --algorithm.")
+    elif args.key is None:  # CLI-2
+        parser.error("--key обязателен при --hmac и --cmac.")
+    if args.cmac and args.algorithm is not None:
+        parser.error("--algorithm не применим к --cmac: CMAC строится на AES-128, а не на хеш-функции.")
+    if args.verify_path is not None and args.output_path is not None:
+        parser.error("--verify и --output нельзя использовать вместе.")
     if args.output_path is not None and is_same_file(args.input_path, args.output_path):
         parser.error("--output совпадает с --input: входной файл был бы перезаписан хешем.")
 
-    hasher = ALGORITHMS[args.algorithm]()
+    try:
+        if args.hmac:
+            hasher = HMAC(parse_mac_key(args.key), args.algorithm or "sha256")
+        elif args.cmac:
+            hasher = CMAC(parse_mac_key(args.key))
+        else:
+            hasher = ALGORITHMS[args.algorithm]()
+        # читаем заранее, чтобы не хешировать большой файл зря при испорченном файле с ожидаемым MAC
+        expected = read_expected_mac(args.verify_path) if args.verify_path is not None else None
+    except ValueError as e:
+        print(f"Ошибка: {e}", file=sys.stderr)
+        sys.exit(1)
+
     for chunk in iter_input_chunks(args.input_path):  # IO-2: по частям, память не растёт
         hasher.update(chunk)
+
+    if expected is not None:  # CLI-4: проверка MAC
+        label = "HMAC" if args.hmac else "CMAC"
+        if constant_time_equal(hasher.digest(), expected):
+            write_stdout(f"[OK] {label} verification successful\n".encode())
+            return
+        print(f"[ERROR] {label} verification failed", file=sys.stderr)
+        sys.exit(1)
+
     # IO-3: одни и те же байты и для stdout, и для файла; имя кодируется как в файловой системе
     line = os.fsencode(format_digest_line(hasher.hexdigest(), args.input_path) + "\n")
 
