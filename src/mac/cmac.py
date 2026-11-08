@@ -18,9 +18,12 @@ class CMAC:
     digest_size = BLOCK_SIZE
 
     def __init__(self, key: bytes):
+        if not isinstance(key, (bytes, bytearray)):
+            raise TypeError(f"ключ CMAC должен быть bytes, получено {type(key).__name__}.")
         if len(key) != 16:
             raise ValueError(f"для AES-128-CMAC нужен ключ 16 байт, получено {len(key)}.")
-        self._cipher = get_block_cipher(key)
+        self._key = bytes(key)
+        self._cipher = get_block_cipher(self._key)
         # генерация подключей (SP 800-38B, 6.1): L = AES_K(0^128), K1 = 2L, K2 = 4L
         l_block = self._cipher.encrypt(b"\x00" * BLOCK_SIZE)
         self.k1 = _double(l_block)
@@ -49,4 +52,5 @@ class CMAC:
         return self.digest().hex()
 
     def compute(self, message: bytes) -> str:
-        return self.update(message).hexdigest()
+        # CMAC одного целого сообщения; потоковое состояние этого объекта не затрагивается
+        return CMAC(self._key).update(message).hexdigest()
