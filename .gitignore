@@ -17,4 +17,4 @@ dist/
 decrypted*.txt
 
 # рабочая папка NIST STS (tests/run_nist_sts.sh)
-nist_sts/
+/nist_sts/
